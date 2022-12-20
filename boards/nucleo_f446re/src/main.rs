@@ -71,6 +71,7 @@ struct NucleoF446RE {
 
     scheduler: &'static RoundRobinSched<'static>,
     systick: cortexm4::systick::SysTick,
+    screen: &'static capsules::epd_waveshare::ED037TC1<'static, stm32f446re::gpio::Pin<'static>>,
 }
 
 /// Mapping of integer syscalls to objects that implement syscalls.
@@ -87,6 +88,7 @@ impl SyscallDriverLookup for NucleoF446RE {
             capsules::alarm::DRIVER_NUM => f(Some(self.alarm)),
             capsules::temperature::DRIVER_NUM => f(Some(self.temperature)),
             capsules::gpio::DRIVER_NUM => f(Some(self.gpio)),
+            capsules::epd_waveshare::DRIVER_NUM => f(Some(self.screen)),
             kernel::ipc::DRIVER_NUM => f(Some(&self.ipc)),
             _ => f(None),
         }
@@ -483,6 +485,15 @@ pub unsafe fn main() {
         ),
     )
     .finalize(components::gpio_component_static!(stm32f446re::gpio::Pin));
+
+    // The EPD device I added
+    let spi_device = static_init!(
+        VirtualSpiMasterDevice<'static, nrf52840::spi::SPIM>,
+        VirtualSpiMasterDevice::new(
+            mux_spi,
+            &peripherals.gpio_port[Pin::P0_05], // CS pin
+        ),
+    );
 
     // PROCESS CONSOLE
     let process_console = components::process_console::ProcessConsoleComponent::new(
