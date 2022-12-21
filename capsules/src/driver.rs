@@ -18,6 +18,9 @@ pub enum NUM {
     AnalogComparator      = 0x00007,
     LowLevelDebug         = 0x00008,
     ReadOnlyState         = 0x00009,
+    Modem                 = 0x0000A,
+    Keyboard              = 0x0000B,
+
 
     // Kernel
     Ipc                   = 0x10000,

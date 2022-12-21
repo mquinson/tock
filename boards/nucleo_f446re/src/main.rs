@@ -1,3 +1,4 @@
+
 //! Board file for Nucleo-F446RE development board
 //!
 //! - <https://www.st.com/en/evaluation-tools/nucleo-f446re.html>
@@ -10,11 +11,13 @@
 
 use capsules::virtual_alarm::VirtualMuxAlarm;
 use components::gpio::GpioComponent;
+//TODO use capsules::spi_controller;
 use kernel::capabilities;
 use kernel::component::Component;
 use kernel::dynamic_deferred_call::{DynamicDeferredCall, DynamicDeferredCallClientState};
 use kernel::hil::gpio::Configure;
 use kernel::hil::led::LedHigh;
+//TODO use kernel::hil::spi::SpiMaster;
 use kernel::platform::{KernelResources, SyscallDriverLookup};
 use kernel::scheduler::round_robin::RoundRobinSched;
 use kernel::{create_capability, debug, static_init};
@@ -52,7 +55,15 @@ pub static mut STACK_MEMORY: [u8; 0x2000] = [0; 0x2000];
 /// A structure representing this platform that holds references to all
 /// capsules for this platform.
 struct NucleoF446RE {
-    console: &'static capsules::console::Console<'static>,
+    //USART2 connected to stlink for debug output
+    console: &'static capsules::console::Console<'static>, 
+    //USART1 connected to modem
+    modem: &'static capsules::console::Console<'static>,
+    //USART3 connected to keyboard
+    keyboard: &'static capsules::console::Console<'static>,
+
+
+//TODO    spi: &'static capsules::spi_controller::SpiMaster<'static>,
     ipc: kernel::ipc::IPC<{ NUM_PROCS as u8 }>,
     led: &'static capsules::led::LedDriver<
         'static,
@@ -80,7 +91,14 @@ impl SyscallDriverLookup for NucleoF446RE {
         F: FnOnce(Option<&dyn kernel::syscall::SyscallDriver>) -> R,
     {
         match driver_num {
+	    //this is the unclear part. how to map separate console capsules?
+	    //can the same self.console be used for separate syscalls?
             capsules::console::DRIVER_NUM => f(Some(self.console)),
+//TODO            capsules::driver::NUM::Modem as usize => f(Some(self.console)),
+//TODO            capsules::driver::NUM::Keyboard as usize => f(Some(self.console)),
+
+//TODO	    capsules::spi::DRIVER_NUM => f(Some(self.spi)),
+
             capsules::led::DRIVER_NUM => f(Some(self.led)),
             capsules::button::DRIVER_NUM => f(Some(self.button)),
             capsules::adc::DRIVER_NUM => f(Some(self.adc)),
@@ -135,7 +153,7 @@ impl
         &()
     }
 }
-
+//TODO add support for usart1 based on the dma code
 /// Helper function called during bring-up that configures DMA.
 unsafe fn setup_dma(
     dma: &stm32f446re::dma::Dma1,
@@ -202,10 +220,40 @@ unsafe fn set_pin_primary_functions(
         pin.enable_interrupt();
     });
 
+
+    // USART1 (modem link): let's use PB6 and PB7
+    gpio_ports.get_pin(PinId::PB06).map(|pin| {
+        pin.set_mode(Mode::AlternateFunctionMode);
+        // AF7 is USART1_TX
+        pin.set_alternate_function(AlternateFunction::AF7);
+    });
+    gpio_ports.get_pin(PinId::PB07).map(|pin| {
+        pin.set_mode(Mode::AlternateFunctionMode);
+        // AF7 is USART1_RX
+        pin.set_alternate_function(AlternateFunction::AF7);
+    });
+    // TODO: add control flow pins as well
+
+
+    // USART3 (keyboard link): let's use PB10 and PB11
+    gpio_ports.get_pin(PinId::PB10).map(|pin| {
+        pin.set_mode(Mode::AlternateFunctionMode);
+        // AF7 is USART3_TX
+        pin.set_alternate_function(AlternateFunction::AF7);
+    });
+    gpio_ports.get_pin(PinId::PB11).map(|pin| {
+        pin.set_mode(Mode::AlternateFunctionMode);
+        // AF7 is USART3_RX
+        pin.set_alternate_function(AlternateFunction::AF7);
+    });
+
+    // TODO clarify why this is here ; button is somewhere else?!
     // enable interrupt for gpio 2
     gpio_ports.get_pin(PinId::PA10).map(|pin| {
         pin.enable_interrupt();
     });
+
+    //TODO spi pins + screen pins
 
     // Arduino A0
     gpio_ports.get_pin(PinId::PA00).map(|pin| {
@@ -243,10 +291,18 @@ unsafe fn setup_peripherals(tim2: &stm32f446re::tim2::Tim2) {
     // USART2 IRQn is 38
     cortexm4::nvic::Nvic::new(stm32f446re::nvic::USART2).enable();
 
+    // USART1 IRQn is 37
+    cortexm4::nvic::Nvic::new(stm32f446re::nvic::USART1).enable();
+
+    // USART3 IRQn is 39
+    cortexm4::nvic::Nvic::new(stm32f446re::nvic::USART3).enable();
+
     // TIM2 IRQn is 28
     tim2.enable_clock();
     tim2.start();
     cortexm4::nvic::Nvic::new(stm32f446re::nvic::TIM2).enable();
+
+    // TODO spi IRQ
 }
 
 /// Statically initialize the core peripherals for the chip.
@@ -302,6 +358,7 @@ pub unsafe fn main() {
     );
 
     let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&PROCESSES));
+//TODO do we need more of those deferred calls for the 2nd uart and other peripherals?
     let dynamic_deferred_call_clients =
         static_init!([DynamicDeferredCallClientState; 2], Default::default());
     let dynamic_deferred_caller = static_init!(
@@ -316,12 +373,28 @@ pub unsafe fn main() {
     );
     CHIP = Some(chip);
 
-    // UART
-
     // Create a shared UART channel for kernel debug.
     base_peripherals.usart2.enable_clock();
-    let uart_mux = components::console::UartMuxComponent::new(
+    let uart_mux_debug = components::console::UartMuxComponent::new(
         &base_peripherals.usart2,
+        115200,
+        dynamic_deferred_caller,
+    )
+    .finalize(components::uart_mux_component_static!());
+
+    // Create a shared UART channel for the modem
+    base_peripherals.usart1.enable_clock();
+    let uart_mux_modem = components::console::UartMuxComponent::new(
+        &base_peripherals.usart1,
+        115200,
+        dynamic_deferred_caller,
+    )
+    .finalize(components::uart_mux_component_static!());
+
+    // Create a shared UART channel for the keyboard
+    base_peripherals.usart3.enable_clock();
+    let uart_mux_keyboard = components::console::UartMuxComponent::new(
+        &base_peripherals.usart3,
         115200,
         dynamic_deferred_caller,
     )
@@ -331,6 +404,7 @@ pub unsafe fn main() {
     // tell `send_byte()` not to configure the USART again.
     io::WRITER.set_initialized();
 
+
     // Create capabilities that the board needs to call certain protected kernel
     // functions.
     let memory_allocation_capability = create_capability!(capabilities::MemoryAllocationCapability);
@@ -339,15 +413,40 @@ pub unsafe fn main() {
         create_capability!(capabilities::ProcessManagementCapability);
 
     // Setup the console.
-    let console = components::console::ConsoleComponent::new(
+    let console_debug = components::console::ConsoleComponent::new(
         board_kernel,
         capsules::console::DRIVER_NUM,
-        uart_mux,
+        uart_mux_debug,
     )
     .finalize(components::console_component_static!());
     // Create the debugger object that handles calls to `debug!()`.
-    components::debug_writer::DebugWriterComponent::new(uart_mux)
+    components::debug_writer::DebugWriterComponent::new(uart_mux_debug)
         .finalize(components::debug_writer_component_static!());
+
+    // Setup the modem console.
+    let console_modem = components::console::ConsoleComponent::new(
+        board_kernel,
+        capsules::driver::NUM::Modem as usize, //defined in capsule/drivers.rs
+        uart_mux_modem,
+    )
+    .finalize(components::console_component_static!());
+
+    // Setup the keyboard console.
+    let console_keyboard = components::console::ConsoleComponent::new(
+        board_kernel,
+        capsules::driver::NUM::Keyboard as usize, //defined in capsule/drivers.rs
+        uart_mux_keyboard,
+    )
+    .finalize(components::console_component_static!());
+
+
+    // SPI TODO figure out this properly
+//    let spi = components::spi_controller::SpiMaster::new(
+//        board_kernel,
+//        capsules::spi_controller::DRIVER_NUM,
+//    )
+//    .finalize(components::spi_component_static!());
+
 
     // LEDs
     let gpio_ports = &base_peripherals.gpio_ports;
@@ -487,7 +586,7 @@ pub unsafe fn main() {
     // PROCESS CONSOLE
     let process_console = components::process_console::ProcessConsoleComponent::new(
         board_kernel,
-        uart_mux,
+        uart_mux_debug,
         mux_alarm,
         process_printer,
     )
@@ -500,8 +599,11 @@ pub unsafe fn main() {
         .finalize(components::round_robin_component_static!(NUM_PROCS));
 
     let nucleo_f446re = NucleoF446RE {
-        console: console,
-        ipc: kernel::ipc::IPC::new(
+        modem: console_modem,
+        keyboard: console_keyboard,
+        console: console_debug,
+//TODO        spi: spi,
+	ipc: kernel::ipc::IPC::new(
             board_kernel,
             kernel::ipc::DRIVER_NUM,
             &memory_allocation_capability,
